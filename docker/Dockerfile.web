@@ -1,0 +1,58 @@
+# ============================================
+# BeeCastly Web Frontend Dockerfile
+# ============================================
+
+FROM node:18-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+COPY packages/web/package.json ./packages/web/
+COPY packages/shared/package.json ./packages/shared/
+
+# Install dependencies
+RUN npm ci --workspace=packages/web --workspace=packages/shared
+
+# Build the application
+FROM base AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build shared package first
+RUN npm run build --workspace=packages/shared
+
+# Build web package
+RUN npm run build --workspace=packages/web
+
+# Production image
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 beecastly
+
+# Copy built application
+COPY --from=builder --chown=beecastly:nodejs /app/packages/web/.next/standalone ./
+COPY --from=builder --chown=beecastly:nodejs /app/packages/web/.next/static ./.next/static
+COPY --from=builder --chown=beecastly:nodejs /app/packages/web/public ./public
+
+USER beecastly
+
+EXPOSE 3000
+
+ENV HOSTNAME="0.0.0.0"
+ENV PORT=3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost:3000 || exit 1
+
+CMD ["node", "server.js"]

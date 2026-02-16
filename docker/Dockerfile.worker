@@ -1,0 +1,56 @@
+# ============================================
+# BeeCastly Worker Dockerfile
+# ============================================
+
+FROM node:18-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+COPY packages/api/package.json ./packages/api/
+COPY packages/shared/package.json ./packages/shared/
+
+# Install dependencies
+RUN npm ci --workspace=packages/api --workspace=packages/shared
+
+# Build the application
+FROM base AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build shared package first
+RUN npm run build --workspace=packages/shared
+
+# Build API package (includes worker code)
+RUN npm run build --workspace=packages/api
+
+# Production image
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 beecastly
+
+# Copy built application
+COPY --from=builder --chown=beecastly:nodejs /app/packages/api/dist ./dist
+COPY --from=builder --chown=beecastly:nodejs /app/packages/api/package.json ./
+COPY --from=builder --chown=beecastly:nodejs /app/node_modules ./node_modules
+
+# Create logs directory
+RUN mkdir -p logs && chown beecastly:nodejs logs
+
+USER beecastly
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
+  CMD pgrep -f "node dist/worker.js" > /dev/null || exit 1
+
+CMD ["node", "dist/worker.js"]
